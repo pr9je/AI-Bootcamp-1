@@ -12,7 +12,7 @@ load_dotenv()
 llm = ChatGroq(
     model="openai/gpt-oss-120b",
     temperature=0,
-    max_tokens=1000,
+    max_tokens=1500,
 )
 
 
@@ -60,6 +60,8 @@ def ask_json(agent_name, instructions, data):
 
 
     response = llm.invoke(prompt)
+    print(f"\nAgent: {agent_name}")
+    print("Finish reason:", response.response_metadata.get("finish_reason"))
     content = response.content
 
     # Handle text-block responses
@@ -111,8 +113,9 @@ def ask_json(agent_name, instructions, data):
 
 
 
+
 def collect_missing_inputs(room):
-    """Collect missing fields and validate the supplied values."""
+    """Collect missing fields and validate supplied values."""
 
     numeric_fields = {
         "ventilation_rate_m3_s": "Ventilation airflow (m³/s)",
@@ -122,13 +125,16 @@ def collect_missing_inputs(room):
         "infiltration_rate_m3_s": "Infiltration airflow (m³/s)",
         "occupant_sensible_heat_w": "Total occupant sensible heat (W)",
         "roof_area_m2": "Applicable roof area (m²)",
-        "occupant_sensible_heat_w":"Total occupant sensible heat (W)",
     }
 
     text_fields = {
         "solar_gain_orientation": "Window orientation",
-        "humidity_control_parameters": ("Indoor humidity target or design requirements"),
-        "floor_location": ("Room floor location (top, intermediate, or ground)"),
+        "humidity_control_parameters": (
+            "Indoor humidity target or design requirements"
+        ),
+        "floor_location": (
+            "Room floor location (top, intermediate, or ground)"
+        ),
     }
 
     data = room.model_dump()
@@ -137,6 +143,7 @@ def collect_missing_inputs(room):
         **numeric_fields,
         **text_fields,
     }.items():
+
         if data.get(field) is not None:
             continue
 
@@ -145,7 +152,8 @@ def collect_missing_inputs(room):
                 f"Enter {description}, or type 'skip': "
             ).strip()
 
-            if answer.lower() == "skip":
+            # Handle skip before numeric conversion
+            if answer.lower() in {"skip", "null", "none", "n/a"}:
                 break
 
             if not answer:
@@ -159,24 +167,34 @@ def collect_missing_inputs(room):
                     value = answer
 
                     if field == "solar_gain_orientation":
-                        allowed = {"north","south","east","west"}
+                        allowed = {"north", "south", "east", "west"}
+
                         if value.lower() not in allowed:
-                            print("Enter north, south, east, west or skip.")
+                            print("Enter north, south, east, west, or skip.")
                             continue
+
+                        value = value.lower()
+
+                    elif field == "floor_location":
+                        allowed = {"top", "intermediate", "ground"}
+
+                        if value.lower() not in allowed:
+                            print("Enter top, intermediate, ground, or skip.")
+                            continue
+
                         value = value.lower()
 
                     elif field == "humidity_control_parameters":
                         if len(value) < 3:
-                            print("Please enter a meaningful humidity requirement or skip")
+                            print("Enter a meaningful humidity requirement.")
                             continue
 
-
-                                                                                                            
-
                 candidate = {**data, field: value}
+
                 validated_room = HVACRoomData.model_validate(
                     candidate
                 )
+
                 data = validated_room.model_dump()
                 break
 
@@ -188,10 +206,7 @@ def collect_missing_inputs(room):
 
 
 
-
 def check_required_inputs(data):
-    """Return required fields that are missing or None."""
-
     required_fields = [
         "floor_area_m2",
         "ceiling_height_m",
@@ -204,44 +219,112 @@ def check_required_inputs(data):
         "ventilation_rate_m3_s",
         "wall_u_value_w_m2k",
         "window_shgc",
-        "roof_u_value_w_m2k",
         "infiltration_rate_m3_s",
-        "occupant_sensible_heat_w",
-        "roof_area_m2",
-        "solar_gain_orientation",
         "humidity_control_parameters",
+        "floor_location",
     ]
 
-    return [
+    missing = [
         field
         for field in required_fields
         if data.get(field) is None
     ]
 
+    if data.get("floor_location") == "top":
+        for field in ["roof_u_value_w_m2k", "roof_area_m2"]:
+            if data.get(field) is None:
+                missing.append(field)
 
+    return missing
+
+
+
+
+def filter_irrelevant_roof_requirements(analysis, validated_data):
+    """
+    Remove roof requirements when the room is not
+    directly exposed to the roof in this simplified model.
+    """
+
+    floor_location = validated_data.get("floor_location")
+
+    roof_fields = {
+        "roof_u_value_w_m2k",
+        "roof_area_m2",
+    }
+
+    # Roof fields are applicable only to top-floor rooms
+    if floor_location in {"intermediate", "ground"}:
+
+        missing_inputs = analysis.get("missing_inputs", [])
+
+        analysis["missing_inputs"] = [
+            field for field in missing_inputs
+            if field not in roof_fields
+        ]
+
+    # Update status if roof requirements were the only issue
+    if not analysis.get("missing_inputs"):
+        analysis["calculation_status"] = "ready_for_calculation"
+
+    return analysis
+
+def calculate_wall_area(room_data):
+    length = room_data.get("length_m")
+    width = room_data.get("width_m")
+    height = room_data.get("ceiling_height_m")
+
+    if length is None or width is None or height is None:
+        return None
+
+    gross_wall_area = 2 * (length + width) * height
+
+    window_area = room_data.get("window_area_m2") or 0
+
+    return max(gross_wall_area - window_area, 0)
 
 def run_workflow(question):
     # AGENT 1: Extract room data
+    
     extracted = ask_json(
         "HVAC Expert",
         """
-Extract these fields:
-room_dimensions, floor_area_m2, ceiling_height_m,
-window_area_m2, occupancy, lighting_load_w,
-equipment_load_w, indoor_target_c, outdoor_design_c,
-ventilation_rate_m3_s, wall_u_value_w_m2k, window_shgc, roof_u_value_w_m2k,
-infiltration_rate_m3_s,
-occupant_sensible_heat_w,
-roof_area_m2,
-solar_gain_orientation,
-humidity_control_parameters.
+    Extract the following fields from the user question:
 
-Use numeric values for numeric fields and null when unknown.
-Calculate floor area only when room dimensions support it.
-Calculate lighting and equipment loads from supplied ratings.
-""",
+    room_dimensions
+    floor_area_m2
+    ceiling_height_m
+    window_area_m2
+    occupancy
+    lighting_load_w
+    equipment_load_w
+    indoor_target_c
+    outdoor_design_c
+    ventilation_rate_m3_s
+    wall_u_value_w_m2k
+    window_shgc
+    roof_u_value_w_m2k
+    infiltration_rate_m3_s
+    occupant_sensible_heat_w
+    roof_area_m2
+    solar_gain_orientation
+    humidity_control_parameters
+    floor_location
+
+    Rules:
+    1. Return all 19 fields.
+    2. Use numeric values for numeric fields.
+    3. Use null for unknown values.
+    4. Calculate floor area from dimensions when possible.
+    5. Calculate lighting and equipment loads from supplied ratings.
+    6. Extract west-facing orientation when stated.
+    7. Never invent missing engineering data.
+
+    Return one compact JSON object only.
+    """,
         {"question": question},
     )
+
 
     # Pydantic validates the extracted fields
     try:
@@ -280,40 +363,58 @@ Calculate lighting and equipment loads from supplied ratings.
 
     
 
-    # AGENT 2: Assess calculation readiness
+        # AGENT 2: Assess calculation readiness
     analysis = ask_json(
         "Engineering Analyst",
-        
-"""
-Assess whether the supplied room data supports a reliable
-cooling-load calculation.
+        """
+Assess the supplied HVAC room data.
 
-Return exactly these keys:
+Return:
 calculation_status, missing_inputs,
 cooling_capacity_kw, explanation.
 
-Use "insufficient_data" if a defensible calculation
-cannot be completed.
-Set cooling_capacity_kw to null if insufficient data.
-Use a JSON array for missing_inputs.
-Do not invent values or provide an unsupported capacity.
-"""
-,
+Rules:
+1. Respect the supplied floor_location.
+2. If floor_location is "intermediate" or "ground",
+   do not require roof_u_value_w_m2k or roof_area_m2.
+3. If floor_location is "top", assess roof data.
+4. Identify other missing engineering parameters.
+5. Never invent missing values.
+6. Do not calculate cooling capacity using assumptions
+   that have not been explicitly provided.
+7. Set cooling_capacity_kw to null if a reliable
+   cooling-load calculation cannot be completed.
+8. Return one valid JSON object.
+""",
         {"validated_room_data": validated_data},
+    )
+
+    # PYTHON: Enforce conditional roof requirements
+    analysis = filter_irrelevant_roof_requirements(
+        analysis,
+        validated_data
     )
 
     # AGENT 3: Review the assessment
     review = ask_json(
         "HVAC Reviewer",
         """
-Review the room data and analyst assessment.
+Review the supplied HVAC room data and engineering assessment.
 
 Return:
 review_status, issues, final_answer, safety_note.
 
-Check that insufficient data does not lead to an unsupported
-cooling capacity. Mention that final equipment selection
-requires manufacturer performance data and qualified review.
+Rules:
+1. Respect floor_location in validated_room_data.
+2. For intermediate and ground floors, do not report
+   missing roof U-value or roof area as issues under
+   this simplified workflow.
+3. For top floors, review applicable roof requirements.
+4. Check whether the analyst identified missing inputs.
+5. Do not approve unsupported cooling capacity.
+6. Manufacturer performance data and qualified
+   engineering review are required for final VRF selection.
+7. Return one valid JSON object.
 """,
         {
             "validated_room_data": validated_data,
