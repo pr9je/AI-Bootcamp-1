@@ -1,0 +1,7 @@
+# Core LangChain integration with Grok (xAI)
+langchain
+langchain-openai
+python-dotenv
+
+# Tavily search tools
+tavily-python
