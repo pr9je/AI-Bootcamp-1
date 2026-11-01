@@ -17,26 +17,48 @@ llm = ChatGroq(
 
 
 # 1. Define the expected data structure
+
 class HVACRoomData(BaseModel):
     room_dimensions: Optional[str] = None
+
+    # Room geometry
+    length_m: Optional[float] = Field(default=None, gt=0)
+    width_m: Optional[float] = Field(default=None, gt=0)
     floor_area_m2: Optional[float] = Field(default=None, gt=0)
     ceiling_height_m: Optional[float] = Field(default=None, gt=0)
+
+    # Envelope areas
+    wall_area_m2: Optional[float] = Field(default=None, ge=0)
     window_area_m2: Optional[float] = Field(default=None, ge=0)
+
+    # Internal loads
     occupancy: Optional[int] = Field(default=None, ge=0)
     lighting_load_w: Optional[float] = Field(default=None, ge=0)
     equipment_load_w: Optional[float] = Field(default=None, ge=0)
+    occupant_sensible_heat_w: Optional[float] = Field(default=None, ge=0)
+
+    # Indoor and outdoor conditions
     indoor_target_c: Optional[float] = None
     outdoor_design_c: Optional[float] = None
+    humidity_control_parameters: Optional[str] = None
+
+    # Ventilation and infiltration
     ventilation_rate_m3_s: Optional[float] = Field(default=None, ge=0)
+    infiltration_rate_m3_s: Optional[float] = Field(default=None, ge=0)
+
+    # Thermal properties
     wall_u_value_w_m2k: Optional[float] = Field(default=None, gt=0)
     window_shgc: Optional[float] = Field(default=None, ge=0, le=1)
-    roof_u_value_w_m2k: Optional[float] = Field(default=None, gt=0)
-    infiltration_rate_m3_s: Optional[float] = Field(default=None, ge=0)
-    occupant_sensible_heat_w: Optional[float] = Field(default=None, ge=0)
-    roof_area_m2: Optional[float] = Field(default=None, ge=0)
     solar_gain_orientation: Optional[str] = None
-    humidity_control_parameters: Optional[str] = None
+
+    # Roof properties
+    roof_u_value_w_m2k: Optional[float] = Field(default=None, gt=0)
+    roof_area_m2: Optional[float] = Field(default=None, ge=0)
+
+    # Room location
     floor_location: Optional[str] = None
+
+    
 
 
 
@@ -310,6 +332,8 @@ def run_workflow(question):
     solar_gain_orientation
     humidity_control_parameters
     floor_location
+    length_m
+    width_m
 
     Rules:
     1. Return all 19 fields.
@@ -319,6 +343,9 @@ def run_workflow(question):
     5. Calculate lighting and equipment loads from supplied ratings.
     6. Extract west-facing orientation when stated.
     7. Never invent missing engineering data.
+    8. Extract length_m and width_m separately when dimensions are provided.
+    9. Never invent wall_area_m2.
+    10. Return null for unavailable dimensions.
 
     Return one compact JSON object only.
     """,
