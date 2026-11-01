@@ -305,6 +305,35 @@ def calculate_wall_area(room_data):
 
     return max(gross_wall_area - window_area, 0)
 
+
+def calculated_room_geometry(room):
+    """
+    Calculate floor are and opaque wall area using available room dimensions.
+    """
+
+    if room.lenght_m is not None and room.width_m is not None:
+
+        calculate_floor_area = (
+            room.length_m * room.width_m
+        )
+
+        room.floo_area_m2 = calculated_floor_area
+
+    if (
+        room.length_m is not None
+        and room.width_m is not None
+        and room.ceiling_height_m is not None
+    ):
+        gross_wall_area =(
+            2 * (room.length_m + room.width_m) * room.ceiling_height_m
+        )
+
+        window_area = room.window_area_m2 or 0
+
+        room.wall_area_m2 = max(gross_wall_area - window_area, 0)
+
+    return room
+
 def run_workflow(question):
     # AGENT 1: Extract room data
     
