@@ -6,6 +6,7 @@ from typing import Optional
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, ValidationError
 from langchain_groq import ChatGroq
+from hvac_load_calculator import calculate_wall_conduction_load
 
 load_dotenv()
 
@@ -57,6 +58,16 @@ class HVACRoomData(BaseModel):
 
     # Room location
     floor_location: Optional[str] = None
+
+    # Ventilation conditions
+    ventilation_supply_air_temp_c: Optional[float] = None
+
+    # Latent heat gains
+    occupant_latent_heat_w: Optional[float] = Field(default=None,ge=0)
+
+    latent_heat_load_w: Optional[float] = Field(default=None,ge=0)
+
+    external_wall_area_m2: Optional[float] = Field(default=None,ge=0)
 
     
 
@@ -147,6 +158,7 @@ def collect_missing_inputs(room):
         "infiltration_rate_m3_s": "Infiltration airflow (m³/s)",
         "occupant_sensible_heat_w": "Total occupant sensible heat (W)",
         "roof_area_m2": "Applicable roof area (m²)",
+        "external_wall_area_m2": "Externally exposed opaque wall area (m²)",
     }
 
     text_fields = {
@@ -306,33 +318,77 @@ def calculate_wall_area(room_data):
     return max(gross_wall_area - window_area, 0)
 
 
+
 def calculated_room_geometry(room):
     """
-    Calculate floor are and opaque wall area using available room dimensions.
+    Calculate floor area, room volume,
+    gross wall area and opaque wall area.
     """
 
-    if room.lenght_m is not None and room.width_m is not None:
+    # Check whether room dimensions are available
+    if room.length_m is not None and room.width_m is not None:
 
-        calculate_floor_area = (
+        room.floor_area_m2 = (
             room.length_m * room.width_m
         )
 
-        room.floo_area_m2 = calculated_floor_area
-
+    # Calculate room volume
     if (
         room.length_m is not None
         and room.width_m is not None
         and room.ceiling_height_m is not None
     ):
-        gross_wall_area =(
-            2 * (room.length_m + room.width_m) * room.ceiling_height_m
+
+        room_volume_m3 = (
+            room.length_m
+            * room.width_m
+            * room.ceiling_height_m
         )
 
+        # Calculate gross wall area
+        gross_wall_area = (
+            2 * (room.length_m + room.width_m)
+            * room.ceiling_height_m
+        )
+
+        # Subtract window area
         window_area = room.window_area_m2 or 0
 
-        room.wall_area_m2 = max(gross_wall_area - window_area, 0)
+        room.wall_area_m2 = max(
+            gross_wall_area - window_area,
+            0
+        )
+
+        print("\n--- ROOM GEOMETRY ---")
+        print(f"Floor area: {room.floor_area_m2:.2f} m²")
+        print(f"Room volume: {room_volume_m3:.2f} m³")
+        print(f"Gross wall area: {gross_wall_area:.2f} m²")
+        print(f"Opaque wall area: {room.wall_area_m2:.2f} m²")
 
     return room
+
+
+def calculate_internal_loads(room):
+    """
+    Calculate lighting and equipment loads
+    from their supplied ratings.
+    """
+
+    lighting_load = room.lighting_load_w
+    equipment_load = room.equipment_load_w
+
+    if lighting_load is None or equipment_load is None:
+        return None
+
+    total_internal_load = lighting_load + equipment_load
+
+    print("\n--- INTERNAL LOAD CALCULATIONS ---")
+    print(f"Lighting load: {lighting_load:.2f} W")
+    print(f"Equipment load: {equipment_load:.2f} W")
+    print(f"Total internal electrical load: {total_internal_load:.2f} W")
+
+    return total_internal_load
+
 
 def run_workflow(question):
     # AGENT 1: Extract room data
@@ -343,8 +399,12 @@ def run_workflow(question):
     Extract the following fields from the user question:
 
     room_dimensions
+    length_m
+    width_m
     floor_area_m2
     ceiling_height_m
+    wall_area_m2
+    external_wall_area_m2
     window_area_m2
     occupancy
     lighting_load_w
@@ -361,11 +421,12 @@ def run_workflow(question):
     solar_gain_orientation
     humidity_control_parameters
     floor_location
-    length_m
-    width_m
+    ventilation_supply_air_temp_c
+    occupant_latent_heat_w
+    latent_heat_load_w
 
     Rules:
-    1. Return all 19 fields.
+    1. Return all 27 requested fields..
     2. Use numeric values for numeric fields.
     3. Use null for unknown values.
     4. Calculate floor area from dimensions when possible.
@@ -375,6 +436,14 @@ def run_workflow(question):
     8. Extract length_m and width_m separately when dimensions are provided.
     9. Never invent wall_area_m2.
     10. Return null for unavailable dimensions.
+    11. Extract these values only when explicitly supplied.
+    12. Return null when unknown.
+    13. Never estimate or invent latent heat values.
+    14. Do not treat occupant latent heat as the total room latent heat.
+    15. Return exactly one JSON object.
+    16. Include every requestd field.
+    17. Use null for every unavailable field.
+    18. Do not include Markdown or explanatory text.
 
     Return one compact JSON object only.
     """,
@@ -390,6 +459,11 @@ def run_workflow(question):
         print(error)
         return
 
+    #Calculate room gemoetry 
+    room = calculated_room_geometry(room)
+
+    calculate_internal_loads(room)
+
     validated_data = room.model_dump()
 
     missing_required = check_required_inputs(validated_data)
@@ -397,6 +471,9 @@ def run_workflow(question):
     if missing_required:
         print("\n--- COLLECTING MISSING INPUTS ---")
         room = collect_missing_inputs(room)
+
+        room = calculated_room_geometry(room)
+
         validated_data = room.model_dump()
 
         missing_required = check_required_inputs(validated_data)
